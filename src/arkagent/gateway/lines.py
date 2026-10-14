@@ -59,12 +59,15 @@ def _to_check(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # ── engines ─────────────────────────────────────────────────────────────────
 def engine_line(status: EngineStatus, *, now: datetime | None = None) -> str:
     """`<engine> off|idle|busy|error`, a busy engine followed by its job's status line,
-    or by `by=` alone when the work is outside the engine's queue."""
+    or by `by=` alone when the work is outside the engine's queue. `resident` marks an
+    engine that is not working but keeps a model loaded — it still blocks the others."""
     parts = [status.name, status.state]
     if status.job_id is not None:
         ref = job_ref(status.name, status.job_id)
         parts.append(status_line(ref, status.job, now=now) if status.job is not None else ref)
     parts += _fields(by=status.busy_by, detail=status.detail or None)
+    if status.resident:
+        parts.append("resident")
     if status.state in ("idle", "busy") and status.contract != CONTRACT_VERSION:
         parts.append(f"contract={_text(status.contract)}")  # 아직 계약에 맞추지 않은 엔진. 없으면 null
     return " ".join(parts)

@@ -404,3 +404,14 @@ def test_a_paused_job_is_not_finished():
            "stages": [{"name": "voice", "state": "running", "progress": 0.4}]}
 
     assert status_line("tts:j1", job) == "tts:j1 paused recipe=course-narration stage=voice progress=40%"
+
+
+def test_an_engine_holding_a_resident_model_blocks_the_others(said):
+    machine = Machine("tts", "music")
+    machine.engines["music"].resident = "ace-step:18001"  # 앱이 켜 둔 상주 모델 서버(쉬는 동안 약 26GB)
+
+    assert machine.ark("engines") == EXIT_OK
+    assert said()[0][1:] == ["tts idle", "music busy by=ace-step:18001 resident"]
+
+    assert machine.ark("submit", "tts", "selftest") == EXIT_BUSY
+    assert said() == ([], ["blocked music busy by=ace-step:18001 resident"])

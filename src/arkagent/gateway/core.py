@@ -28,6 +28,7 @@ class EngineStatus:
     job_id: str | None = None  # 대기열에서 실행 중인 작업. busy인데 없으면 대기열 밖의 일이다
     job: dict[str, Any] | None = None  # 실행 중인 작업 기록. 읽지 못했으면 None
     busy_by: str | None = None
+    resident: bool = False  # 일이 아니라 쉬는 동안 올라 있는 상주 모델 때문에 busy다
     detail: str = ""
 
 
@@ -125,7 +126,8 @@ class Gateway:
                 return EngineStatus(name, "busy", contract=health.get("contract"),
                                     job_id=str(current) if current else None,
                                     job=self._peek(client, str(current)) if current else None,
-                                    busy_by=busy_by if isinstance(busy_by, str) else None)
+                                    busy_by=busy_by if isinstance(busy_by, str) else None,
+                                    resident=health.get("resident") is True)
         except EngineUnreachable:
             return EngineStatus(name, "off")
         except EngineError as error:
