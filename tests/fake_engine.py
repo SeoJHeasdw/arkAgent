@@ -34,7 +34,7 @@ class FakeEngine:
         self.time = time or FakeClock()
         self.jobs: dict[str, dict] = {}
         self.outside: str | None = None  # 대기열 밖의 일(앱이 직접 돌리는 작업)의 busyBy
-        self.resident: str | None = None  # 쉬는 동안에도 메모리를 쥔 상주 모델 서버의 busyBy
+        self.resident: str | None = None  # 일 없이 모델을 쥔(계약 위반) 모델 서버의 busyBy
         self.recipes = [{
             "name": "something-else" if "no_selftest" in self.flaws else "selftest",
             "label": "계약 검사", "paramsSchema": {"type": "object"}, "needsReview": False,

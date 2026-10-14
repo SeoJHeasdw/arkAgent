@@ -102,13 +102,16 @@ def test_command_runs_no_check_on_an_engine_that_is_working(work, capsys):
     assert len(engine.jobs) == (1 if work == "queued job" else 0)
 
 
-def test_engine_that_only_holds_a_resident_model_is_checked():
+def test_engine_holding_a_model_with_no_work_is_checked_and_fails_for_it():
     engine = FakeEngine()
-    engine.resident = "ace-step:18001"  # 앱이 켜 둔 상주 모델 서버 — selftest는 그것을 쓰지 않는다
+    engine.resident = "ace-step:18001"  # 앱이 켜 둔 모델 서버 — selftest는 그것을 쓰지 않는다
 
     assert _working(engine.client()) is None
     results = run_checks(engine.client(), poll=0.2, sleep=engine.sleep, clock=engine.clock)
-    assert [(result.name, result.detail) for result in results if not result.ok] == []
+
+    failed = [result for result in results if not result.ok]
+    assert [result.name for result in failed] == ["idle_holds_no_model"]
+    assert "ace-step:18001" in failed[0].detail
 
 
 def test_resident_model_must_be_declared_to_be_checked(capsys):

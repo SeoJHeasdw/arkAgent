@@ -406,9 +406,9 @@ def test_a_paused_job_is_not_finished():
     assert status_line("tts:j1", job) == "tts:j1 paused recipe=course-narration stage=voice progress=40%"
 
 
-def test_an_engine_holding_a_resident_model_blocks_the_others(said):
+def test_an_engine_holding_a_model_with_no_work_blocks_the_others(said):
     machine = Machine("tts", "music")
-    machine.engines["music"].resident = "ace-step:18001"  # 앱이 켜 둔 상주 모델 서버(쉬는 동안 약 26GB)
+    machine.engines["music"].resident = "ace-step:18001"  # 계약 위반이지만 메모리는 실제로 쥐어져 있다
 
     assert machine.ark("engines") == EXIT_OK
     assert said()[0][1:] == ["tts idle", "music busy by=ace-step:18001 resident"]

@@ -222,7 +222,7 @@ def _selftest_runs(run: _Run) -> None:
     _expect(seen_busy, "health.busy was never true while the job was running")
     after = run.client.health()
     _expect(after.get("currentJob") != job_id, "health.currentJob still names a finished job")
-    # 상주 모델 서버를 쥔 엔진은 끝난 뒤에도 busy다. 그때는 resident로 그렇다고 말해야 한다.
+    # 일 없이 모델을 쥔 엔진은 끝난 뒤에도 busy다. 그 위반은 idle_holds_no_model이 따로 잡는다.
     _expect(after.get("busy") is False or after.get("resident") is True,
             "health.busy is still true after the job finished, and the engine does not say it is resident")
     run.done_job = final
@@ -281,6 +281,14 @@ def _finding_review_is_recorded(run: _Run) -> None:
     _expect_status(lambda: run.client.review_finding(job_id, "no-such-finding", "pending"), 404, "an unknown finding id")
 
 
+def _idle_holds_no_model(run: _Run) -> None:
+    """With no work left, the engine holds no model memory (the contract's first rule)."""
+    health = run.client.health()
+    _expect(health.get("resident") is not True,
+            f"the engine holds a model with no work (busyBy={health.get('busyBy')}) — "
+            "start the model server when work comes and stop it when the queue is empty")
+
+
 def _lists_recent_jobs(run: _Run) -> None:
     jobs = run.client.jobs(limit=2)
     _expect(isinstance(jobs, list) and 1 <= len(jobs) <= 2, f"limit=2 returned {len(jobs)} jobs")
@@ -300,6 +308,7 @@ CHECKS: tuple[tuple[str, Callable[[_Run], None]], ...] = (
     ("review_is_recorded", _review_is_recorded),
     ("finding_review_is_recorded", _finding_review_is_recorded),
     ("lists_recent_jobs", _lists_recent_jobs),
+    ("idle_holds_no_model", _idle_holds_no_model),
 )
 
 
@@ -325,8 +334,9 @@ def run_checks(
 
 
 def _working(client: EngineClient) -> str | None:
-    """What the engine is working on, or None when it is idle, only holds a resident
-    model (selftest does not need it), or does not answer (the checks then report it)."""
+    """What the engine is working on, or None when it is idle, holds a model with no
+    work (selftest does not need it; idle_holds_no_model fails), or does not answer
+    (the checks then report it)."""
     try:
         health = client.health()
     except Exception:  # noqa: BLE001 — a broken health answer is the health check's to report
