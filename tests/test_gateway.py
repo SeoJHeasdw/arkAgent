@@ -358,3 +358,49 @@ def test_gateway_reads_engine_addresses_from_what_it_is_given():
     gateway = Gateway({"assets": "http://127.0.0.1:1"}, connect=lambda url: FakeEngine(name="assets").client(url))
 
     assert [(status.name, status.state) for status in gateway.engines()] == [("assets", "idle")]
+
+
+# ── 2026-10-14 개정: busy · 항목 확인 · paused ─────────────────────────────
+def test_work_outside_the_queue_shows_as_busy_and_blocks_the_others(said):
+    machine = Machine("assets", "tts")
+    machine.engines["tts"].outside = "app:15100"  # 앱이 서비스 대기열 밖에서 직접 돌리는 작업
+
+    assert machine.ark("engines") == EXIT_OK
+    assert said()[0][:2] == ["assets idle", "tts busy by=app:15100"]
+
+    assert machine.ark("submit", "assets", "selftest") == EXIT_BUSY
+    assert said() == ([], ["blocked tts busy by=app:15100"])
+
+
+def test_engine_still_on_the_earlier_contract_is_read_by_its_current_job(said):
+    machine = Machine("assets", "music", music="no_busy")
+    machine.ark("submit", "music", "selftest", "--params", LONG)
+    said()
+
+    assert machine.ark("submit", "assets", "selftest") == EXIT_BUSY
+    assert said()[1][0].startswith("blocked music busy music:job-1 running")
+
+
+def test_findings_a_person_cleared_are_counted_but_not_listed():
+    job = {
+        "state": "done", "recipe": "image", "dir": "/tmp/j", "assets": [],
+        "findings": [
+            {"id": "f01", "severity": "fail", "code": "image.empty", "where": "후보 1", "review": "cleared"},
+            {"id": "f02", "severity": "warn", "code": "image.touches_edge", "where": "후보 2", "review": "pending"},
+            {"id": "f03", "severity": "warn", "code": "image.touches_edge", "where": "후보 3"},  # 개정 전 엔진
+        ],
+    }
+
+    assert result_lines("assets:j", job) == [
+        "assets:j done recipe=image assets=0 findings=2 cleared=1",
+        "dir /tmp/j",
+        "finding f02 warn image.touches_edge where=\"후보 2\"",
+        "finding f03 warn image.touches_edge where=\"후보 3\"",
+    ]
+
+
+def test_a_paused_job_is_not_finished():
+    job = {"state": "paused", "recipe": "course-narration",
+           "stages": [{"name": "voice", "state": "running", "progress": 0.4}]}
+
+    assert status_line("tts:j1", job) == "tts:j1 paused recipe=course-narration stage=voice progress=40%"

@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 
 from ..core.errors import ArkAgentError, ConflictError, ValidationError
-from ..engines.client import EngineClient, EngineError, EngineTimeout, EngineUnreachable
+from ..engines.client import EngineClient, EngineError, EngineTimeout, EngineUnreachable, is_busy
 
 
 @dataclass(frozen=True)
@@ -25,8 +25,9 @@ class EngineStatus:
     name: str
     state: str  # "off" | "idle" | "busy" | "error"
     contract: object = None  # health.contract 그대로
-    job_id: str | None = None
+    job_id: str | None = None  # 대기열에서 실행 중인 작업. busy인데 없으면 대기열 밖의 일이다
     job: dict[str, Any] | None = None  # 실행 중인 작업 기록. 읽지 못했으면 None
+    busy_by: str | None = None
     detail: str = ""
 
 
@@ -117,11 +118,14 @@ class Gateway:
         try:
             with self._engine(name) as client:
                 health = client.health()
-                current = health.get("currentJob")
-                if not current:
+                if not is_busy(health):
                     return EngineStatus(name, "idle", contract=health.get("contract"))
-                return EngineStatus(name, "busy", contract=health.get("contract"), job_id=str(current),
-                                    job=self._peek(client, str(current)))
+                current = health.get("currentJob")
+                busy_by = health.get("busyBy")
+                return EngineStatus(name, "busy", contract=health.get("contract"),
+                                    job_id=str(current) if current else None,
+                                    job=self._peek(client, str(current)) if current else None,
+                                    busy_by=busy_by if isinstance(busy_by, str) else None)
         except EngineUnreachable:
             return EngineStatus(name, "off")
         except EngineError as error:

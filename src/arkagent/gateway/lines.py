@@ -49,18 +49,22 @@ def _duration(seconds: float | None) -> str | None:
     return f"{seconds:.0f}s" if seconds >= 10 else f"{seconds:.1f}s"
 
 
-def _fail_first(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(findings, key=lambda finding: finding.get("severity") != "fail")
+def _to_check(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Findings no person has cleared yet, `fail` first. An engine on the earlier
+    contract has no `review` on findings, so all of its findings are still to check."""
+    open_ = [finding for finding in findings if finding.get("review") != "cleared"]
+    return sorted(open_, key=lambda finding: finding.get("severity") != "fail")
 
 
 # ── engines ─────────────────────────────────────────────────────────────────
 def engine_line(status: EngineStatus, *, now: datetime | None = None) -> str:
-    """`<engine> off|idle|busy|error`, a busy engine followed by its job's status line."""
+    """`<engine> off|idle|busy|error`, a busy engine followed by its job's status line,
+    or by `by=` alone when the work is outside the engine's queue."""
     parts = [status.name, status.state]
     if status.job_id is not None:
         ref = job_ref(status.name, status.job_id)
         parts.append(status_line(ref, status.job, now=now) if status.job is not None else ref)
-    parts += _fields(detail=status.detail or None)
+    parts += _fields(by=status.busy_by, detail=status.detail or None)
     if status.state in ("idle", "busy") and status.contract != CONTRACT_VERSION:
         parts.append(f"contract={_text(status.contract)}")  # 아직 계약에 맞추지 않은 엔진. 없으면 null
     return " ".join(parts)
@@ -131,9 +135,11 @@ def status_line(ref: str, job: dict[str, Any], *, now: datetime | None = None) -
             fields["errorCode"] = job.get("errorCode")
             fields["stage"] = next((stage.get("name") for stage in stages if stage.get("state") == "failed"), None)
         findings = job.get("findings") or []
+        to_check = _to_check(findings)
         fields["assets"] = len(job.get("assets") or [])
-        fields["findings"] = len(findings)
-        fields["fail"] = sum(finding.get("severity") == "fail" for finding in findings) or None
+        fields["findings"] = len(to_check)
+        fields["fail"] = sum(finding.get("severity") == "fail" for finding in to_check) or None
+        fields["cleared"] = (len(findings) - len(to_check)) or None
     else:
         stage = next((stage for stage in stages if stage.get("state") == "running"), None)
         if stage is not None:
@@ -146,8 +152,8 @@ def status_line(ref: str, job: dict[str, Any], *, now: datetime | None = None) -
 
 def result_lines(ref: str, job: dict[str, Any], *, top: int = DEFAULT_TOP, everything: bool = False,
                  now: datetime | None = None) -> list[str]:
-    """The status line, the job folder, the assets, and the top findings (`fail` first).
-    Asset and evidence paths are relative to the `dir` line."""
+    """The status line, the job folder, the assets, and the top findings still to check
+    (`fail` first). Asset and evidence paths are relative to the `dir` line."""
     lines = [status_line(ref, job, now=now), f"dir {_text(job.get('dir'))}"]
     if job.get("error"):
         lines.append(f"error {_text(str(job['error'])[:MAX_ERROR_CHARS])}")
@@ -160,7 +166,7 @@ def result_lines(ref: str, job: dict[str, Any], *, top: int = DEFAULT_TOP, every
     if len(shown) < len(assets):
         lines.append(f"more assets={len(assets) - len(shown)}")
 
-    findings = _fail_first(job.get("findings") or [])
+    findings = _to_check(job.get("findings") or [])
     shown = findings if everything else findings[:max(top, 0)]
     for finding in shown:
         evidence = finding.get("evidence") or []
