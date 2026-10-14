@@ -27,9 +27,17 @@ class EngineError(ArkAgentError):
     http = 502
 
     def __init__(self, status: int, detail: str = "") -> None:
-        super().__init__(f"engine answered {status}: {detail}" if detail else f"engine answered {status}")
+        super().__init__(f"engine answered {status}: {detail}" if detail else f"engine answered {status}",
+                         params={"status": status, **({"detail": detail} if detail else {})})
         self.status = status
         self.detail = detail
+
+
+class EngineUnreachable(ArkAgentError):
+    """Nothing is listening at the engine's address — the engine is off."""
+
+    code = "engine.unreachable"
+    http = 503
 
 
 class EngineTimeout(ArkAgentError):
@@ -46,7 +54,10 @@ class EngineClient:
         self._http.close()
 
     def request(self, method: str, path: str, *, json: Any = None, headers: dict[str, str] | None = None) -> Any:
-        response = self._http.request(method, path, json=json, headers=headers)
+        try:
+            response = self._http.request(method, path, json=json, headers=headers)
+        except httpx.ConnectError as error:
+            raise EngineUnreachable(f"nothing answers at {self.base_url}") from error
         if response.status_code >= 400:
             try:
                 detail = str(response.json().get("detail", ""))
