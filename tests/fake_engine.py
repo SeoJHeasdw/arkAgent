@@ -34,6 +34,7 @@ class FakeEngine:
         self.time = time or FakeClock()
         self.jobs: dict[str, dict] = {}
         self.outside: str | None = None  # 대기열 밖의 일(앱이 직접 돌리는 작업)의 busyBy
+        self.resident: str | None = None  # 쉬는 동안에도 메모리를 쥔 상주 모델 서버의 busyBy
         self.recipes = [{
             "name": "something-else" if "no_selftest" in self.flaws else "selftest",
             "label": "계약 검사", "paramsSchema": {"type": "object"}, "needsReview": False,
@@ -89,7 +90,8 @@ class FakeEngine:
             finishedAt=self._stamp(),
             stages=[
                 {"name": f"step-{index + 1}", "label": f"단계 {index + 1}", "state": "done", "progress": 1.0,
-                 "seconds": job["_stepSeconds"], "peakMemoryBytes": None}
+                 "seconds": job["_stepSeconds"], "peakMemoryBytes": None,
+                 **({"peakMemoryMethod": "guess"} if "unknown_memory_method" in self.flaws else {})}
                 for index in range(stage_count)
             ],
             assets=[{
@@ -121,11 +123,14 @@ class FakeEngine:
             current = running["id"] if running else None
             if "stale_current_job" in self.flaws and self.jobs:
                 current = next(iter(self.jobs))
+            working = running is not None or self.outside is not None
             health = {"ok": True, "engine": self.name, "version": "0.0.0", "contract": 0,
-                      "busy": running is not None or self.outside is not None,
+                      "busy": working or self.resident is not None,
                       "currentJob": current, "outputDir": f"/tmp/{self.name}-engine"}
-            if self.outside is not None:
-                health["busyBy"] = self.outside
+            if self.outside is not None or self.resident is not None:
+                health["busyBy"] = self.outside or self.resident
+            if self.resident is not None and not working and "hides_resident" not in self.flaws:
+                health["resident"] = True
             for flaw, key in (("no_contract", "contract"), ("no_busy", "busy")):
                 if flaw in self.flaws:
                     del health[key]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from arkagent.engines.client import EngineTimeout
-from arkagent.engines.conformance import CHECKS, EXIT_BUSY, main, run_checks
+from arkagent.engines.conformance import CHECKS, EXIT_BUSY, _working, main, run_checks
 from fake_engine import FakeEngine
 
 
@@ -39,6 +39,7 @@ _SELFTEST = {"selftest_runs", "review_is_recorded", "finding_review_is_recorded"
         ("absolute_paths", _SELFTEST),
         ("approves_itself", _SELFTEST),
         ("no_findings", _SELFTEST),
+        ("unknown_memory_method", _SELFTEST),
         ("clears_itself", _SELFTEST),
         ("stale_current_job", _SELFTEST),
         ("ignores_cancel", {"cancel_stops_a_running_job"}),
@@ -99,3 +100,19 @@ def test_command_runs_no_check_on_an_engine_that_is_working(work, capsys):
     assert status == EXIT_BUSY
     assert out.startswith("BUSY") and "FAIL" not in out and "PASS" not in out
     assert len(engine.jobs) == (1 if work == "queued job" else 0)
+
+
+def test_engine_that_only_holds_a_resident_model_is_checked():
+    engine = FakeEngine()
+    engine.resident = "ace-step:18001"  # 앱이 켜 둔 상주 모델 서버 — selftest는 그것을 쓰지 않는다
+
+    assert _working(engine.client()) is None
+    results = run_checks(engine.client(), poll=0.2, sleep=engine.sleep, clock=engine.clock)
+    assert [(result.name, result.detail) for result in results if not result.ok] == []
+
+
+def test_resident_model_must_be_declared_to_be_checked(capsys):
+    engine = FakeEngine("hides_resident")
+    engine.resident = "ace-step:18001"
+
+    assert main(["http://127.0.0.1:47999"], client=engine.client()) == EXIT_BUSY

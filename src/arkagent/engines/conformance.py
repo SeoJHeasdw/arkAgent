@@ -35,6 +35,7 @@ from .client import (
 FOREIGN_ORIGIN = "http://example.invalid"
 ERROR_CODES = frozenset({"invalid_input", "out_of_memory", "interrupted", "engine_error"})
 SHA256 = re.compile(r"[0-9a-f]{64}")
+MEMORY_METHODS = frozenset({"time-l", "sampled"})
 EXIT_BUSY = 3
 
 
@@ -115,6 +116,9 @@ def _check_done_record(job: dict[str, Any]) -> None:
         _expect("peakMemoryBytes" in stage, f"stage {name} has no peakMemoryBytes")
         peak = stage["peakMemoryBytes"]
         _expect(peak is None or (_is_number(peak) and peak >= 0), f"stage {name} peakMemoryBytes is {peak!r}")
+        method = stage.get("peakMemoryMethod")
+        _expect(method is None or method in MEMORY_METHODS,
+                f"stage {name} peakMemoryMethod is {method!r}, expected one of {sorted(MEMORY_METHODS)}")
 
     _expect(job["assets"], "selftest must leave one asset")
     for asset in job["assets"]:
@@ -163,6 +167,10 @@ def _health(run: _Run) -> None:
     _expect(isinstance(health.get("busy"), bool), "health.busy must be a boolean")
     _expect(health.get("busyBy") is None or isinstance(health["busyBy"], str), "health.busyBy must be a string or absent")
     _expect(not health["currentJob"] or health["busy"], "health.busy must be true while currentJob is set")
+    resident = health.get("resident")
+    _expect(resident is None or isinstance(resident, bool), "health.resident must be a boolean or absent")
+    _expect(not resident or (health["busy"] and not health["currentJob"]),
+            "health.resident means busy with no current job")
     _expect(isinstance(health.get("outputDir"), str), "health.outputDir must be a string")
 
 
@@ -214,7 +222,9 @@ def _selftest_runs(run: _Run) -> None:
     _expect(seen_busy, "health.busy was never true while the job was running")
     after = run.client.health()
     _expect(after.get("currentJob") != job_id, "health.currentJob still names a finished job")
-    _expect(after.get("busy") is False, "health.busy is still true after the job finished")
+    # 상주 모델 서버를 쥔 엔진은 끝난 뒤에도 busy다. 그때는 resident로 그렇다고 말해야 한다.
+    _expect(after.get("busy") is False or after.get("resident") is True,
+            "health.busy is still true after the job finished, and the engine does not say it is resident")
     run.done_job = final
 
 
@@ -315,13 +325,15 @@ def run_checks(
 
 
 def _working(client: EngineClient) -> str | None:
-    """What the engine is busy with, or None when it is idle or does not answer
-    (the checks then report what is wrong)."""
+    """What the engine is working on, or None when it is idle, only holds a resident
+    model (selftest does not need it), or does not answer (the checks then report it)."""
     try:
         health = client.health()
     except Exception:  # noqa: BLE001 — a broken health answer is the health check's to report
         return None
     if not isinstance(health, dict) or not is_busy(health):
+        return None
+    if not health.get("currentJob") and health.get("resident") is True:
         return None
     return f"currentJob={health.get('currentJob')} busyBy={health.get('busyBy')}"
 
