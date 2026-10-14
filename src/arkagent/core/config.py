@@ -49,9 +49,21 @@ class ProviderConfig:
     idle_unload_seconds: float = 60.0
 
 
+# 등록된 엔진과 그 주소. docs/ENGINE-CONTRACT.md의 포트 표와 같아야 한다
+# (tests/test_config.py가 둘을 대조한다).
+DEFAULT_ENGINES: dict[str, str] = {
+    "assets": "http://127.0.0.1:47831",
+    "tts": "http://127.0.0.1:47832",
+    "music": "http://127.0.0.1:47833",
+}
+
+
 @dataclass(frozen=True)
 class Config:
     provider: ProviderConfig = field(default_factory=ProviderConfig)
+    # 엔진 이름 → 주소. config.yaml의 `engines`는 기본값 위에 덮인다: 같은 이름은
+    # 주소를 바꾸고, 새 이름은 엔진을 더하고, null은 그 엔진을 뺀다.
+    engines: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_ENGINES))
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -140,4 +152,21 @@ def _merge(base: Config, raw: dict) -> Config:
         return value if isinstance(value, dict) else {}
 
     prov = {**asdict(base.provider), **_known_fields(ProviderConfig, section("provider"))}
-    return Config(provider=ProviderConfig(**prov))
+    return Config(provider=ProviderConfig(**prov), engines=_merge_engines(base.engines, section("engines")))
+
+
+def _merge_engines(base: dict[str, str], section: dict) -> dict[str, str]:
+    engines = dict(base)
+    for name, value in section.items():
+        # 이름은 작업 참조 `<엔진>:<작업 ID>`의 앞부분이라 콜론과 공백을 받지 않는다.
+        if not isinstance(name, str) or not name or ":" in name or any(ch.isspace() for ch in name):
+            log.warning("config.yaml: ignoring engine with unusable name %r", name)
+        elif value is None:
+            engines.pop(name, None)
+        elif isinstance(value, int) and not isinstance(value, bool):
+            engines[name] = f"http://127.0.0.1:{value}"  # 포트만 적은 경우
+        elif isinstance(value, str) and value.strip():
+            engines[name] = value.strip().rstrip("/")
+        else:
+            log.warning("config.yaml: ignoring engine %s with unusable address %r", name, value)
+    return engines
