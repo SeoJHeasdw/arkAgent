@@ -54,7 +54,7 @@ def test_save_then_load_round_trips(tmp_path):
 
 def test_engines_default_to_the_ports_in_the_contract_document():
     contract = (Path(__file__).parent.parent / "docs" / "ENGINE-CONTRACT.md").read_text(encoding="utf-8")
-    documented = {name: f"http://127.0.0.1:{port}" for name, port in re.findall(r"^\| (\w+) \| (\d+)", contract, re.M)}
+    documented = {name: f"http://127.0.0.1:{port}" for name, port in re.findall(r"^\| (\w+) \| (\d+) ", contract, re.M)}
 
     assert documented == DEFAULT_ENGINES
     assert Config().engines == DEFAULT_ENGINES
