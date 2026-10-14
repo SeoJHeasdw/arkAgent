@@ -14,7 +14,9 @@ arkAgent와 로컬 엔진(tts · music · assets)이 지키는 공통 계약이�
 - 엔진은 한 번에 작업 하나만 실행한다.
 - 쉬는 엔진은 모델 메모리를 쥐지 않는다. 엔진 서비스 프로세스는 모델 런타임을 올리지 않고,
   모델은 단계 프로세스에서만 올라간다. `busy`가 거짓이면 다른 엔진이나 arkAgent의 모델이 그
-  메모리를 써도 된다.
+  메모리를 써도 된다. 상주 모델 서버처럼 이를 지키지 못하는 동안에는 숨기지 않고 `busy` ·
+  `resident`로 알린다. 목표는 서비스가 모델 서버의 수명을 맡아(작업이 오면 켜고, 대기열이 비면 짧은
+  유예 뒤 끈다) 원칙을 지키는 것이다.
 - 자동 검사 통과와 사람의 승인은 다르다. `assets[].review`와 `findings[].review`를 바꾸는 것은
   사람뿐이며 arkAgent와 엔진의 자동 검사는 이 값을 바꾸지 않는다.
 - 사람의 승인은 그 파일에 묶인다. 승인한 뒤 파일이 바뀌면 그 승인은 무효다.
@@ -35,7 +37,7 @@ arkAgent와 로컬 엔진(tts · music · assets)이 지키는 공통 계약이�
 
 | 요청 | 동작 |
 | --- | --- |
-| `GET /api/health` | `{ok, engine, version, contract, busy, busyBy?, currentJob, outputDir}` (아래) |
+| `GET /api/health` | `{ok, engine, version, contract, busy, busyBy?, resident?, currentJob, outputDir}` (아래) |
 | `GET /api/recipes` | 이 엔진이 받는 일의 목록. `{recipes: [{name, label, paramsSchema, needsReview}]}` (아래) |
 | `POST /api/jobs` | `{recipe, params}`를 검증해 대기열에 넣고 작업 기록을 201로 돌려준다. 입력 오류는 400, 지금 받을 수 없으면 409 |
 | `GET /api/jobs/{id}` | 작업 기록. 없으면 404 |
@@ -49,13 +51,15 @@ arkAgent와 로컬 엔진(tts · music · assets)이 지키는 공통 계약이�
 | 필드 | 값 |
 | --- | --- |
 | `contract` | 이 문서의 버전(`0`) |
-| `busy` | 이 엔진이 지금 장비의 메모리를 쓰는 일을 하고 있는가. 대기열 밖의 일(앱이 직접 돌리는 작업, 일시정지한 채 모델을 쥔 작업)도 포함한다. **쉼 판정은 이 값으로 한다** |
-| `busyBy` | 선택. `busy`일 때 무엇이 일하는지 사람이 알아볼 짧은 이름(예: `app:15100`, `lane:generation.lock`). 작업 ID가 아니다 |
+| `busy` | 이 엔진이 지금 장비의 메모리를 쥐고 있는가. 일 때문이든(대기열의 작업, 앱이 직접 돌리는 작업, 일시정지한 채 모델을 쥔 작업) 쉬는 동안 올라 있는 상주 모델 때문이든 참이다. **쉼 판정은 이 값으로 한다** |
+| `busyBy` | 선택. `busy`일 때 무엇이 메모리를 쥐고 있는지 사람이 알아볼 짧은 이름(예: `app:15100`, `lane:generation.lock`, `ace-step:18001`). 작업 ID가 아니다 |
+| `resident` | 선택(없으면 거짓). `busy`인 까닭이 일이 아니라 쉬는 동안에도 올라 있는 상주 모델뿐이면 참. 이때 `currentJob`은 `null`이다. 일이 시작되면 거짓으로 돌아간다 |
 | `currentJob` | 실행 중인 작업의 ID, 없으면 `null`. **이 엔진의 작업 기록에 있는 작업**(`GET /api/jobs/{id}`로 읽고 `cancel`할 수 있는 작업)만 적는다. 대기열을 거치지 않았어도 같은 작업 저장소에 기록이 있으면 적는다(예: 엔진 서버 없이 도는 독립 CLI의 작업). 작업 기록이 없는 일은 `busyBy`로만 알린다 |
-| `outputDir` | 작업 폴더들이 있는 곳 |
+| `outputDir` | 작업 기록이 있는 곳. 작업 폴더(`dir`)는 이 밖에 있어도 된다 |
 
 `currentJob`이 있으면 `busy`는 참이다. `busy`가 참이고 `currentJob`이 `null`이면 작업 기록이 없는 일을
-하는 중이다.
+하는 중이거나(`resident`가 거짓), 상주 모델을 쥔 채 쉬는 중이다(`resident`가 참). arkAgent는 어느
+쪽이든 메모리가 쥐어져 있으므로 다른 엔진을 막는다.
 
 ### recipes
 
@@ -66,6 +70,16 @@ arkAgent와 로컬 엔진(tts · music · assets)이 지키는 공통 계약이�
   스키마로 말할 수 없는 것은 `description`에 적는다.
 - `needsReview`: 이 레시피의 결과는 사람이 보고 판단해야 쓸 수 있다. arkAgent는 `needsReview`인
   레시피의 결과를 사람의 승인 없이 최종으로 넘기지 않는다.
+
+### 이어하기 `params.resumeFrom`
+
+- 끊긴 작업을 잇는 레시피는 `params.resumeFrom`으로 같은 엔진의 작업 ID를 받는다. 받는 레시피만
+  `paramsSchema`에 이 키를 둔다.
+- 엔진은 그 작업의 결과를 스스로 검사해(계보 · 지문 · 해시 등) 통과한 부분만 이어 쓰고, 이어 쓴
+  단계는 `skipped`로 남긴다. 검사를 통과하지 못하면 그 부분은 다시 만든다.
+- 묵시적 재사용은 요구하지 않는다. `resumeFrom` 없이 같은 입력으로 다시 넣으면 처음부터 다시
+  계산해도 된다.
+- arkAgent는 `interrupted`로 끝난 작업을 다시 넣을 때, 레시피가 `resumeFrom`을 받으면 그것을 붙인다.
 
 ## 작업 기록
 
@@ -101,13 +115,14 @@ arkAgent와 로컬 엔진(tts · music · assets)이 지키는 공통 계약이�
 
 | 필드 | 값 |
 | --- | --- |
-| `dir` | 작업 폴더의 절대 경로. 결과를 열어 보거나 작업을 넘겨받는 쪽이 여기서 시작한다. 파일에 적지 않고 읽을 때 붙여도 된다 |
+| `dir` | 작업 폴더의 절대 경로. 결과를 열어 보거나 작업을 넘겨받는 쪽이 여기서 시작한다. 파일에 적지 않고 읽을 때 붙여도 된다. 여러 작업이 한 폴더를 나눠 쓸 수 있고(예: 같은 곡의 버전 추가 · 구간 수정), `outputDir` 밖이어도 된다. 나눠 쓰는 폴더는 작업 하나를 정리한다고 지우지 않는다 |
 | `state` | `queued`, `running`, `paused`, `cancelling`, `done`, `failed`, `cancelled` (아래) |
 | `stages[].state` | `running`, `done`, `failed`, `cancelled`, `skipped` |
 | `stages[].seconds` | 단계가 끝나면 채운다. 모델을 올리는 시간이 따로 재어지면 `loadSeconds`로 나눠 적는다 |
-| `stages[].peakMemoryBytes` | 단계 동안 그 단계의 프로세스가 쓴 최대 메모리. macOS에서는 `/usr/bin/time -l`의 peak memory footprint(통합 메모리의 Metal 버퍼가 포함된다). 프로세스 여럿이 동시에 돌면 각 최대값의 합(상한)으로 적는다. 다 세지 못하면 센 만큼 적고, 모르거나 프로세스가 없는 단계는 `null` |
+| `stages[].peakMemoryBytes` | 단계 동안 그 단계의 일을 한 프로세스가 쓴 최대 메모리. macOS에서는 `/usr/bin/time -l`의 peak memory footprint(통합 메모리의 Metal 버퍼가 포함된다). 단계 밖에서 오래 사는 모델 서버가 일을 했으면 단계 동안 그 프로세스의 footprint를 일정 간격으로 읽은 최댓값을 적는다(쉬는 동안 쥔 양도 포함된다). 프로세스 여럿이 동시에 돌면 각 최대값의 합(상한)으로 적는다. 다 세지 못하면 센 만큼 적고, 모르거나 프로세스가 없는 단계는 `null` |
+| `stages[].peakMemoryMethod` | 선택. `peakMemoryBytes`를 잰 방식. `time-l`(단계 프로세스의 `/usr/bin/time -l`) 또는 `sampled`(단계 동안 표본으로 읽은 footprint의 최댓값). 측정 기록이 장비를 견줄 때 같은 방식끼리 견주기 위한 것이다 |
 | `assets[].file` · `findings[].evidence` | 작업 폴더(`dir`) 기준 상대 경로. `..`을 쓰지 않는다 |
-| `assets[].review` | `pending`, `approved`, `rejected`. `pending`은 "사람의 판단이 기록되지 않았다"는 뜻이지 "아직 안 봤다"가 아니다. 앱이 사람의 판단을 다른 방식으로 적는다면(즐겨찾기처럼) 뜻이 같을 때만 이 값으로 옮긴다 |
+| `assets[].review` | `pending`, `approved`, `rejected`. `pending`은 "사람의 판단이 기록되지 않았다"는 뜻이지 "아직 안 봤다"가 아니다(들어 보기만 한 것도 `pending`). 앱이 사람의 판단을 다른 방식으로 적는다면(즐겨찾기처럼) 뜻이 같을 때만 이 값으로 옮긴다 |
 | `assets[].reviewedSha256` | 선택. 사람이 판단할 때의 파일 SHA-256(소문자 16진수 64자). 지금 파일과 다르면 엔진은 그 판단을 내보내지 않고 `pending`으로 돌린다 |
 | `findings[].severity` | `fail`(다시 만들어야 함), `warn`(사람이 확인) |
 | `findings[].code` · `params` | 엔진이 정한 안정적인 식별자와 그 값. 표시 문구가 아니라 판정 근거다 |
@@ -129,7 +144,7 @@ arkAgent와 로컬 엔진(tts · music · assets)이 지키는 공통 계약이�
 엔진이 다시 시작한 뒤 대기 작업은 이어서 실행하거나 `failed` · `interrupted`로 끝낸다. 어느 쪽이든
 `cancelled`로 두지 않는다. 다만 엔진이 멈출 때 이미 취소 요청을 받아 `cancelling`이던 작업은
 `cancelled`로 닫는다. 사람이 취소한 작업과 엔진이 끊은 작업을 arkAgent가 구별해야, 끊긴 작업만
-같은 입력으로 다시 넣는다.
+다시 넣는다(레시피가 받으면 `resumeFrom`을 붙여).
 
 ### errorCode
 
@@ -167,8 +182,9 @@ arkAgent와 로컬 엔진(tts · music · assets)이 지키는 공통 계약이�
 uv run --project <arkAgent 경로> ark-engine-check http://127.0.0.1:47832
 ```
 
-- 엔진이 일하는 중(`busy` 또는 `currentJob`)이면 검사를 시작하지 않고 `BUSY`를 알리며 종료 코드 3으로
-  끝난다. `selftest`가 실제 작업 뒤에 줄을 서서 시간 초과로 실패하지 않게 하려는 것이다.
+- 엔진이 일하는 중(`currentJob`이 있거나, `busy`인데 `resident`가 아님)이면 검사를 시작하지 않고
+  `BUSY`를 알리며 종료 코드 3으로 끝난다. `selftest`가 실제 작업 뒤에 줄을 서서 시간 초과로 실패하지
+  않게 하려는 것이다. 상주 모델만 떠 있는 엔진은 검사한다 — `selftest`는 모델을 쓰지 않는다.
 - 한 번 돌 때마다 `selftest` 작업 셋이 남는다. 지울지는 엔진이 정한다(위).
 
 ## 엔진별 현재 상태와 맞출 것
@@ -179,16 +195,16 @@ uv run --project <arkAgent 경로> ark-engine-check http://127.0.0.1:47832
 | --- | --- | --- |
 | assets | 개정 계약 검사 11/11 통과(그 세션의 보고, 커밋 전). `busy`는 기기 공용 생성 차선 잠금까지 본다. 멈춤 기능이 없어 `paused`는 쓰지 않고, 결과 파일을 고쳐 쓰지 않아 `reviewedSha256`도 쓰지 않는다. 진단은 별도 프로세스로 옮겨 쉬는 엔진이 50MB를 유지한다 | 단계 안에서 드러나는 입력 오류는 아직 `engine_error`(가르는 방식은 엔진 고유) |
 | tts | 개정 계약 검사 11/11 통과(그 세션의 보고, 커밋 전). 레시피 `course-narration` · `page-regenerate` · `probe-term`(모두 `needsReview`)이 들어왔지만 실제 모델로 돌린 적은 없다. 앱이 일하면 `busy` · `busyBy: "app:<PID>"` · `currentJob: null`. 앱이 프로세스 없이 `paused`로 기다리는 동안은 `busy`가 거짓이지만 앱이 작업 차선을 쥐고 있어, 그 사이 tts에 넣은 작업은 `queued`로 기다린다(다른 엔진은 메모리를 써도 된다) | 첫 실제 실행은 사람의 확인 뒤. 그쪽 남은 일: `course-narration`의 자막, `out_of_memory` 분류, `resumeFrom` 이어하기, 서비스가 죽을 때 남는 단계 프로세스 정리, 앱을 서비스의 클라이언트로 |
-| music | **보류.** 그 저장소에서 대규모 보정 작업 중이라 계약 작업을 시작하지 않았다. CLI와 프로젝트 폴더, 배치 작업 ID · 이어하기 · 복구가 있고 HTTP 작업 API는 없다 | 보정이 끝난 뒤: 기존 작업 기록을 감싸는 작업 서비스. 청취 판단을 `review`로 옮긴다. 처음부터 개정된 계약에 맞춘다 |
+| music | 1단계 계약 검사 11/11 통과(그 세션의 보고, 커밋 전). 작업 서비스 `uv run music-engine serve`(47833). 기기 공용 생성 차선으로 CLI · 앱과 겹치지 않는다(CLI가 생성 중이면 `busy` · `busyBy: "lane:generation.lock"`). `reviewedSha256`을 쓴다. 모델은 앱이 켜 두는 상주 ACE 서버(127.0.0.1:18001)에 있어 쉬는 동안 약 26GB를 쥔다 — 원칙을 지키지 못하는 상태다 | 상주 ACE만 떠 있을 때 `resident: true`를 내고 검사를 다시 돌린다. 2단계: 레시피 `song` · `versions` · `repaint` · `resume`(`resumeFrom`), 서비스가 ACE의 수명을 맡아 원칙을 지킨다, 상주 서버의 메모리는 `sampled`로 잰다 |
 
 ## 아직 정하지 않은 것
 
 - **엔진 사이의 대기열.** v0에서는 arkAgent가 모든 엔진의 `health.busy`를 보고 한 번에 한 엔진만
   일하게 한다. 사람이 앱에서 직접 넣은 작업과의 경합은 `busy`로만 보인다. 장비 전체를 묶는 잠금이
   필요한지는 실제로 부딪혀 본 뒤 정한다. (tts는 엔진 안에서 앱과 서비스가 파일 잠금 하나를 나눠 쓴다.)
-- **이어하기.** 중단된 작업을 잇는 공통 표현은 없다. 지금은 같은 입력으로 다시 넣으면 엔진이
-  자기 캐시로 이어가는 것에 기댄다. tts는 `params.resumeFrom`을 계획하고 있다 — 두 엔진 이상이 같은
-  모양을 쓰게 되면 계약으로 올린다.
+- **사람이 고른 최종본.** music의 최종본 선택, tts `page-regenerate`의 후보 고르기처럼 사람이 여러
+  결과 중 하나를 고르는 일은 지금 엔진 고유로 둔다. arkAgent가 고른 결과를 다음 일에 넘겨야 할 때
+  계약으로 올린다.
 - **진행 알림.** 지금은 `GET /api/jobs/{id}`를 다시 읽는다. 이벤트 스트림은 필요해지면 더한다.
 
 ## 변경 기록
@@ -218,3 +234,19 @@ assets 반영 뒤 질문에 답해 고친 것(같은 날):
 - 단계 프로세스가 입력 오류를 알리는 방식은 엔진 고유다. 가를 수 없으면 `engine_error`로 둔다.
 
 tts 반영 보고에 따라 적은 것(같은 날): 엔진이 멈출 때 이미 `cancelling`이던 작업은 `cancelled`로 닫는다.
+
+### 2026-10-14 music 1차 보고 반영 (같은 날)
+
+엔진이 맞출 것:
+
+1. `health.resident`(선택) — 상주 모델 서버를 쥔 채 쉬는 엔진만 쓴다. `busy`의 뜻을 "메모리를 쥐고
+   있는가"로 분명히 했다. 검사 도구는 `resident`만인 엔진을 검사하고, `selftest`가 끝난 뒤 `busy`가
+   남아도 `resident`면 통과시킨다.
+2. 이어하기를 받는 레시피는 `params.resumeFrom`(같은 엔진의 작업 ID)으로 받는다. tts · music이 같은
+   모양을 계획해 "아직 정하지 않은 것"에서 올렸다. 묵시적 재사용은 요구하지 않는다.
+3. `stages[].peakMemoryMethod`(선택, `time-l` · `sampled`). 단계 밖의 상주 서버는 표본 최댓값으로 잰다.
+
+문서로만 정한 것: `dir`는 여러 작업이 나눠 쓸 수 있고 `outputDir` 밖이어도 된다, `outputDir`는 작업
+기록이 있는 곳, 들어 보기만 한 것도 `pending`.
+
+엔진 고유로 둔 것: 사람이 고른 최종본(아직 정하지 않은 것으로 옮김).
