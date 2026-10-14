@@ -33,6 +33,7 @@ class FakeEngine:
         self.name = name
         self.time = time or FakeClock()
         self.jobs: dict[str, dict] = {}
+        self.outside: str | None = None  # 대기열 밖의 일(앱이 직접 돌리는 작업)의 busyBy
         self.recipes = [{
             "name": "something-else" if "no_selftest" in self.flaws else "selftest",
             "label": "계약 검사", "paramsSchema": {"type": "object"}, "needsReview": False,
@@ -99,6 +100,7 @@ class FakeEngine:
             findings=[] if "no_findings" in self.flaws else [{
                 "id": "f01", "severity": "warn", "code": "selftest.sample", "params": {"step": 1},
                 "where": "1단계", "assetId": "a01", "evidence": ["final/selftest.txt"],
+                "review": "cleared" if "clears_itself" in self.flaws else "pending",
             }],
         )
 
@@ -120,9 +122,13 @@ class FakeEngine:
             if "stale_current_job" in self.flaws and self.jobs:
                 current = next(iter(self.jobs))
             health = {"ok": True, "engine": self.name, "version": "0.0.0", "contract": 0,
+                      "busy": running is not None or self.outside is not None,
                       "currentJob": current, "outputDir": f"/tmp/{self.name}-engine"}
-            if "no_contract" in self.flaws:
-                del health["contract"]
+            if self.outside is not None:
+                health["busyBy"] = self.outside
+            for flaw, key in (("no_contract", "contract"), ("no_busy", "busy")):
+                if flaw in self.flaws:
+                    del health[key]
             return httpx.Response(200, json=health)
 
         if parts == ["api", "recipes"]:
@@ -174,6 +180,16 @@ class FakeEngine:
             if asset is None:
                 return httpx.Response(404, json={"detail": "에셋을 찾을 수 없습니다."})
             asset["review"] = body["status"]
+            return httpx.Response(200, json=self._public(job))
+
+        if len(parts) == 6 and parts[3] == "findings" and parts[5] == "review" \
+                and "finding_review_unsupported" not in self.flaws:
+            if body.get("status") not in ("pending", "cleared"):
+                return httpx.Response(400, json={"detail": "status가 올바르지 않습니다."})
+            finding = next((item for item in job["findings"] if item["id"] == parts[4]), None)
+            if finding is None:
+                return httpx.Response(404, json={"detail": "확인 항목을 찾을 수 없습니다."})
+            finding["review"] = body["status"]
             return httpx.Response(200, json=self._public(job))
 
         return httpx.Response(404, json={"detail": "없는 경로입니다."})

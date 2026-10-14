@@ -5,12 +5,14 @@ It drives only the required `selftest` recipe, so it never starts model work:
     uv run --project <path to arkAgent> ark-engine-check http://127.0.0.1:47832
 
 Every check runs even when an earlier one fails, so one pass shows everything
-that is still missing. Exit status is 0 only when all checks pass.
+that is still missing. Exit status is 0 only when all checks pass, and 3 when the
+engine was working so no check ran.
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
 from collections.abc import Callable
@@ -19,10 +21,21 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
-from .client import CONTRACT_VERSION, FINAL_STATES, JOB_STATES, REVIEW_STATES, EngineClient, EngineError
+from .client import (
+    CONTRACT_VERSION,
+    FINAL_STATES,
+    FINDING_REVIEW_STATES,
+    JOB_STATES,
+    REVIEW_STATES,
+    EngineClient,
+    EngineError,
+    is_busy,
+)
 
 FOREIGN_ORIGIN = "http://example.invalid"
 ERROR_CODES = frozenset({"invalid_input", "out_of_memory", "interrupted", "engine_error"})
+SHA256 = re.compile(r"[0-9a-f]{64}")
+EXIT_BUSY = 3
 
 
 @dataclass(frozen=True)
@@ -109,6 +122,9 @@ def _check_done_record(job: dict[str, Any]) -> None:
             _expect(isinstance(asset.get(key), str) and asset[key], f"asset.{key} must be a non-empty string")
         _expect(_is_relative(asset.get("file")), f"asset.file must be relative to the job folder: {asset.get('file')!r}")
         _expect(asset.get("review") == "pending", f"a new asset starts pending, not {asset.get('review')!r}")
+        sha = asset.get("reviewedSha256")
+        _expect(sha is None or (isinstance(sha, str) and SHA256.fullmatch(sha)),
+                f"asset.reviewedSha256 must be 64 lowercase hex digits or null: {sha!r}")
 
     _expect(job["findings"], "selftest must leave one finding")
     for finding in job["findings"]:
@@ -119,6 +135,7 @@ def _check_done_record(job: dict[str, Any]) -> None:
         evidence = finding.get("evidence")
         _expect(isinstance(evidence, list) and all(_is_relative(item) for item in evidence),
                 "finding.evidence must be a list of paths relative to the job folder")
+        _expect(finding.get("review") == "pending", f"a new finding starts pending, not {finding.get('review')!r}")
 
 
 @dataclass
@@ -143,6 +160,9 @@ def _health(run: _Run) -> None:
     _expect(health.get("contract") == CONTRACT_VERSION,
             f"health.contract is {health.get('contract')!r}, expected {CONTRACT_VERSION}")
     _expect("currentJob" in health, "health.currentJob is missing")
+    _expect(isinstance(health.get("busy"), bool), "health.busy must be a boolean")
+    _expect(health.get("busyBy") is None or isinstance(health["busyBy"], str), "health.busyBy must be a string or absent")
+    _expect(not health["currentJob"] or health["busy"], "health.busy must be true while currentJob is set")
     _expect(isinstance(health.get("outputDir"), str), "health.outputDir must be a string")
 
 
@@ -179,17 +199,22 @@ def _selftest_runs(run: _Run) -> None:
     _expect(created["state"] in ("queued", "running"), f"a new job is {created['state']!r}")
     job_id = created["id"]
 
-    seen_as_current = False
+    seen_as_current = seen_busy = False
 
     def watch(record: dict[str, Any]) -> None:
-        nonlocal seen_as_current
-        if record.get("state") == "running" and run.client.health().get("currentJob") == job_id:
-            seen_as_current = True
+        nonlocal seen_as_current, seen_busy
+        if record.get("state") == "running":
+            health = run.client.health()
+            seen_as_current = seen_as_current or health.get("currentJob") == job_id
+            seen_busy = seen_busy or health.get("busy") is True
 
     final = run.wait(job_id, timeout=30.0, on_poll=watch)
     _check_done_record(final)
     _expect(seen_as_current, "health.currentJob never named the job while it was running")
-    _expect(run.client.health().get("currentJob") != job_id, "health.currentJob still names a finished job")
+    _expect(seen_busy, "health.busy was never true while the job was running")
+    after = run.client.health()
+    _expect(after.get("currentJob") != job_id, "health.currentJob still names a finished job")
+    _expect(after.get("busy") is False, "health.busy is still true after the job finished")
     run.done_job = final
 
 
@@ -232,6 +257,20 @@ def _review_is_recorded(run: _Run) -> None:
     _expect_status(lambda: run.client.review(job_id, "no-such-asset", "pending"), 404, "an unknown asset id")
 
 
+def _finding_review_is_recorded(run: _Run) -> None:
+    _expect(run.done_job is not None, "no finished selftest job to review")
+    job_id, finding_id = run.done_job["id"], run.done_job["findings"][0]["id"]
+
+    def reviewed(status: str) -> str:
+        record = run.client.review_finding(job_id, finding_id, status)
+        return next(finding for finding in record["findings"] if finding["id"] == finding_id)["review"]
+
+    for status in ("cleared", "pending"):
+        _expect(status in FINDING_REVIEW_STATES and reviewed(status) == status, f"finding review {status!r} was not recorded")
+    _expect_status(lambda: run.client.review_finding(job_id, finding_id, "approved"), 400, "an unknown finding review status")
+    _expect_status(lambda: run.client.review_finding(job_id, "no-such-finding", "pending"), 404, "an unknown finding id")
+
+
 def _lists_recent_jobs(run: _Run) -> None:
     jobs = run.client.jobs(limit=2)
     _expect(isinstance(jobs, list) and 1 <= len(jobs) <= 2, f"limit=2 returned {len(jobs)} jobs")
@@ -249,6 +288,7 @@ CHECKS: tuple[tuple[str, Callable[[_Run], None]], ...] = (
     ("cancel_stops_a_running_job", _cancel_stops_a_running_job),
     ("failure_is_classified", _failure_is_classified),
     ("review_is_recorded", _review_is_recorded),
+    ("finding_review_is_recorded", _finding_review_is_recorded),
     ("lists_recent_jobs", _lists_recent_jobs),
 )
 
@@ -274,13 +314,30 @@ def run_checks(
     return results
 
 
-def main(argv: list[str] | None = None) -> int:
+def _working(client: EngineClient) -> str | None:
+    """What the engine is busy with, or None when it is idle or does not answer
+    (the checks then report what is wrong)."""
+    try:
+        health = client.health()
+    except Exception:  # noqa: BLE001 — a broken health answer is the health check's to report
+        return None
+    if not isinstance(health, dict) or not is_busy(health):
+        return None
+    return f"currentJob={health.get('currentJob')} busyBy={health.get('busyBy')}"
+
+
+def main(argv: list[str] | None = None, *, client: EngineClient | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ark-engine-check", description=__doc__.splitlines()[0])
     parser.add_argument("base_url", help="engine address, e.g. http://127.0.0.1:47832")
     args = parser.parse_args(argv)
 
-    client = EngineClient(args.base_url)
+    client = client or EngineClient(args.base_url)
     try:
+        # selftest는 같은 대기열에 서므로, 일하는 엔진에서는 실제 작업 뒤에서 시간 초과로 실패한다.
+        working = _working(client)
+        if working is not None:
+            print(f"BUSY  the engine is working ({working}); no check ran — run again when it is idle")
+            return EXIT_BUSY
         results = run_checks(client)
     finally:
         client.close()

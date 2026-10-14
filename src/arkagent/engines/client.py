@@ -15,9 +15,17 @@ import httpx
 from ..core.errors import ArkAgentError
 
 CONTRACT_VERSION = 0
-JOB_STATES = frozenset({"queued", "running", "cancelling", "done", "failed", "cancelled"})
+JOB_STATES = frozenset({"queued", "running", "paused", "cancelling", "done", "failed", "cancelled"})
 FINAL_STATES = frozenset({"done", "failed", "cancelled"})
 REVIEW_STATES = frozenset({"pending", "approved", "rejected"})
+FINDING_REVIEW_STATES = frozenset({"pending", "cleared"})
+
+
+def is_busy(health: dict[str, Any]) -> bool:
+    """Whether the engine is using the machine's memory. `busy` decides; an engine
+    still on the earlier contract has only `currentJob` to go by."""
+    busy = health.get("busy")
+    return busy if isinstance(busy, bool) else bool(health.get("currentJob"))
 
 
 class EngineError(ArkAgentError):
@@ -86,6 +94,9 @@ class EngineClient:
 
     def review(self, job_id: str, asset_id: str, status: str) -> dict[str, Any]:
         return self.request("POST", f"/api/jobs/{job_id}/assets/{asset_id}/review", json={"status": status})
+
+    def review_finding(self, job_id: str, finding_id: str, status: str) -> dict[str, Any]:
+        return self.request("POST", f"/api/jobs/{job_id}/findings/{finding_id}/review", json={"status": status})
 
     def wait(
         self,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from arkagent.engines.client import EngineTimeout
-from arkagent.engines.conformance import CHECKS, main, run_checks
+from arkagent.engines.conformance import CHECKS, EXIT_BUSY, main, run_checks
 from fake_engine import FakeEngine
 
 
@@ -24,24 +24,27 @@ def test_conforming_engine_passes_every_check():
     assert len(results) == len(CHECKS)
 
 
-# 완료된 selftest 작업이 없으면 승인 기록 검사도 볼 대상이 없어 함께 실패한다.
-_SELFTEST = {"selftest_runs", "review_is_recorded"}
+# 완료된 selftest 작업이 없으면 승인 기록 검사 둘도 볼 대상이 없어 함께 실패한다.
+_SELFTEST = {"selftest_runs", "review_is_recorded", "finding_review_is_recorded"}
 
 
 @pytest.mark.parametrize(
     ("flaw", "expected"),
     [
         ("no_contract", {"health"}),
+        ("no_busy", {"health"} | _SELFTEST),
         ("accepts_bad_recipe", {"rejects_bad_input"}),
         ("no_origin_check", {"rejects_foreign_origin"}),
         ("one_stage", _SELFTEST),
         ("absolute_paths", _SELFTEST),
         ("approves_itself", _SELFTEST),
         ("no_findings", _SELFTEST),
+        ("clears_itself", _SELFTEST),
         ("stale_current_job", _SELFTEST),
         ("ignores_cancel", {"cancel_stops_a_running_job"}),
         ("wrong_error_code", {"failure_is_classified"}),
         ("review_unsupported", {"review_is_recorded"}),
+        ("finding_review_unsupported", {"finding_review_is_recorded"}),
     ],
 )
 def test_each_flaw_fails_the_check_that_guards_it(flaw, expected):
@@ -59,7 +62,7 @@ def test_job_folder_must_be_an_absolute_path():
     failed = _failed(FakeEngine("relative_dir"))
 
     assert failed == {"selftest_runs", "cancel_stops_a_running_job", "failure_is_classified",
-                      "review_is_recorded", "lists_recent_jobs"}
+                      "review_is_recorded", "finding_review_is_recorded", "lists_recent_jobs"}
 
 
 def test_wait_gives_up_on_a_job_that_never_finishes():
@@ -80,3 +83,19 @@ def test_command_reports_every_check_and_fails_when_nothing_answers(capsys):
     assert status == 1
     assert out.count("FAIL") == len(CHECKS)
     assert f"0/{len(CHECKS)} passed" in out
+
+
+@pytest.mark.parametrize("work", ["queued job", "outside the queue"])
+def test_command_runs_no_check_on_an_engine_that_is_working(work, capsys):
+    engine = FakeEngine()
+    if work == "queued job":
+        engine.client().submit("selftest", {"stepSeconds": 1000.0})
+    else:
+        engine.outside = "app:15100"
+
+    status = main(["http://127.0.0.1:47999"], client=engine.client())
+
+    out = capsys.readouterr().out
+    assert status == EXIT_BUSY
+    assert out.startswith("BUSY") and "FAIL" not in out and "PASS" not in out
+    assert len(engine.jobs) == (1 if work == "queued job" else 0)
